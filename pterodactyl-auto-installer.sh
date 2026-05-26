@@ -127,7 +127,14 @@ detect_os() {
 
 random_string() {
   local len="${1:-32}"
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len"
+  local out=""
+
+  while [[ ${#out} -lt $len ]]; do
+    out+="$(cat /proc/sys/kernel/random/uuid)"
+    out="${out//-/}"
+  done
+
+  printf '%s' "${out:0:$len}"
 }
 
 valid_domain() {
