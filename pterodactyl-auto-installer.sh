@@ -1,949 +1,843 @@
 #!/usr/bin/env bash
-# Pterodactyl Auto Installer
-# Support: Ubuntu 22.04/24.04, Debian 12/13
-# Author: Custom installer template
-# Usage:
-#   bash install.sh
-#   or: curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/install.sh -o install.sh && bash install.sh
-
 set -Eeuo pipefail
 
-export DEBIAN_FRONTEND=noninteractive
+APP_NAME="Stellar Ptero Panel"
+APP_DIR="/opt/stellar-ptero-panel"
+APP_PORT="${APP_PORT:-3300}"
+LOG_FILE="/var/log/stellar-ptero-installer.log"
 
-PANEL_DIR="/var/www/pterodactyl"
-LOG_FILE="/var/log/ptero-installer.log"
-PHP_VER="8.3"
-DB_NAME="panel"
-DB_USER="pterodactyl"
-DEFAULT_TZ="Asia/Jakarta"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-OS_ID=""
-OS_VERSION=""
-OS_CODENAME=""
-APP_URL=""
-PANEL_DOMAIN=""
-ADMIN_EMAIL=""
-ADMIN_USER=""
-ADMIN_PASS=""
-DB_PASS=""
-SSL_MODE="yes"
-
-RED="\033[0;31m"
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-BLUE="\033[0;34m"
-CYAN="\033[0;36m"
-NC="\033[0m"
-
-touch "$LOG_FILE"
-
-on_error() {
-  local exit_code=$?
-  echo -e "${RED}Installer gagal di line $1. Exit code: ${exit_code}${NC}"
-  echo -e "${YELLOW}Cek log: ${LOG_FILE}${NC}"
-  exit "$exit_code"
-}
-trap 'on_error $LINENO' ERR
+trap 'echo -e "${RED}Installer gagal di line $LINENO. Cek ${LOG_FILE}${NC}"; exit 1' ERR
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 banner() {
-  clear
-  echo -e "${CYAN}"
-  cat <<'EOF'
-╔══════════════════════════════════════════════╗
-   PTERODACTYL AUTO INSTALLER
-   Ubuntu 22/24 • Debian 12/13 • Panel/Wings
-╚══════════════════════════════════════════════╝
-EOF
-  echo -e "${NC}"
+  clear || true
+  echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}   STELLAR PTERO CUSTOM PANEL INSTALLER${NC}"
+  echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
+  echo ""
 }
 
-log() {
-  echo -e "$1" | tee -a "$LOG_FILE"
-}
-
-ok() {
-  log "${GREEN}✅ $1${NC}"
-}
-
-warn() {
-  log "${YELLOW}⚠️  $1${NC}"
-}
-
-err() {
-  log "${RED}❌ $1${NC}"
-}
-
-run() {
-  log "${BLUE}CMD:${NC} $*"
-  "$@" 2>&1 | tee -a "$LOG_FILE"
-}
-
-confirm() {
-  local prompt="${1:-Lanjut?}"
-  local ans
-  read -r -p "$prompt [y/N]: " ans
-  [[ "$ans" == "y" || "$ans" == "Y" ]]
-}
-
-need_root() {
+check_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    err "Jalankan sebagai root."
-    echo "Contoh: sudo bash install.sh"
+    echo -e "${RED}Jalankan sebagai root.${NC}"
     exit 1
   fi
 }
 
-need_systemd() {
-  if ! command -v systemctl >/dev/null 2>&1; then
-    err "Systemd tidak ditemukan. Installer ini butuh systemd."
-    exit 1
-  fi
-}
-
-detect_os() {
+check_os() {
   if [[ ! -f /etc/os-release ]]; then
-    err "Tidak bisa membaca /etc/os-release."
+    echo -e "${RED}OS tidak dikenali.${NC}"
     exit 1
   fi
-
-  # shellcheck disable=SC1091
-  source /etc/os-release
-
-  OS_ID="${ID:-}"
-  OS_VERSION="${VERSION_ID:-}"
-  OS_CODENAME="${VERSION_CODENAME:-$(lsb_release -sc 2>/dev/null || true)}"
-
-  case "${OS_ID}:${OS_VERSION}" in
+  . /etc/os-release
+  case "${ID}:${VERSION_ID}" in
     ubuntu:22.04|ubuntu:24.04|debian:12|debian:13)
-      ok "OS support terdeteksi: ${PRETTY_NAME:-$OS_ID $OS_VERSION}"
+      echo -e "${GREEN}OS support terdeteksi: ${PRETTY_NAME}${NC}"
       ;;
     *)
-      err "OS tidak support: ${PRETTY_NAME:-$OS_ID $OS_VERSION}"
-      echo "Support: Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13"
+      echo -e "${RED}OS belum support: ${PRETTY_NAME:-unknown}${NC}"
+      echo "Support: Ubuntu 22.04/24.04, Debian 12/13"
       exit 1
       ;;
   esac
 }
 
-random_string() {
-  local len="${1:-32}"
-  local out=""
-
-  while [[ ${#out} -lt $len ]]; do
-    out+="$(cat /proc/sys/kernel/random/uuid)"
-    out="${out//-/}"
-  done
-
-  printf '%s' "${out:0:$len}"
-}
-
-valid_domain() {
-  local d="$1"
-  [[ "$d" =~ ^[A-Za-z0-9.-]+$ ]] && [[ "$d" == *.* ]]
-}
-
-valid_email() {
-  local e="$1"
-  [[ "$e" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
-}
-
-prompt_panel_data() {
-  echo ""
-  log "${CYAN}Masukkan data Panel${NC}"
-
-  while true; do
-    read -r -p "Domain panel, contoh panel.domain.com: " PANEL_DOMAIN
-    PANEL_DOMAIN="${PANEL_DOMAIN,,}"
-    if valid_domain "$PANEL_DOMAIN"; then
-      break
-    fi
-    warn "Domain tidak valid. Jangan pakai http:// atau https://"
-  done
-
-  APP_URL="https://${PANEL_DOMAIN}"
-
-  while true; do
-    read -r -p "Email admin: " ADMIN_EMAIL
-    if valid_email "$ADMIN_EMAIL"; then
-      break
-    fi
-    warn "Email tidak valid."
-  done
-
-  read -r -p "Username admin [admin]: " ADMIN_USER
-  ADMIN_USER="${ADMIN_USER:-admin}"
-
-  read -r -s -p "Password admin panel, kosongkan untuk auto-generate: " ADMIN_PASS
-  echo ""
-  if [[ -z "$ADMIN_PASS" ]]; then
-    ADMIN_PASS="$(random_string 18)"
-    ok "Password admin dibuat otomatis."
+ask_config() {
+  echo -e "${CYAN}Masukkan konfigurasi web custom.${NC}"
+  read -rp "Domain web custom, contoh stellar.domain.com: " CUSTOM_DOMAIN
+  read -rp "URL Panel Pterodactyl asli, contoh https://panel.domain.com: " PTERO_URL
+  read -rsp "PTLA / Application API Key: " PTLA_KEY; echo ""
+  read -rsp "PTLC / Client API Key opsional untuk power start/stop/restart, enter jika belum ada: " PTLC_KEY; echo ""
+  read -rp "Username admin web custom [admin]: " ADMIN_USERNAME
+  ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+  read -rsp "Password admin web custom: " ADMIN_PASSWORD; echo ""
+  if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    ADMIN_PASSWORD="$(cat /proc/sys/kernel/random/uuid | tr -d '-' | head -c 16)"
+    echo -e "${YELLOW}Password kosong, dibuat otomatis: ${ADMIN_PASSWORD}${NC}"
   fi
 
-  DB_PASS="$(random_string 32)"
+  PTERO_URL="${PTERO_URL%/}"
+}
 
-  read -r -p "Pakai SSL Let's Encrypt? [Y/n]: " SSL_MODE
-  SSL_MODE="${SSL_MODE:-yes}"
-  if [[ "$SSL_MODE" =~ ^[Nn]$ ]]; then
-    APP_URL="http://${PANEL_DOMAIN}"
+install_packages() {
+  echo -e "${CYAN}Install dependency...${NC}"
+  apt-get update -y
+  apt-get install -y curl ca-certificates gnupg nginx certbot python3-certbot-nginx build-essential
+
+  if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | sed 's/v//' | cut -d. -f1)" -lt 18 ]]; then
+    echo -e "${CYAN}Install Node.js 20...${NC}"
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
   fi
 
-  echo ""
-  log "${CYAN}Ringkasan:${NC}"
-  echo "Domain     : $PANEL_DOMAIN"
-  echo "URL        : $APP_URL"
-  echo "Admin email: $ADMIN_EMAIL"
-  echo "Username   : $ADMIN_USER"
-  echo "Timezone   : $DEFAULT_TZ"
-  echo ""
-  if ! confirm "Data sudah benar?"; then
-    err "Dibatalkan."
-    exit 1
+  if ! command -v pm2 >/dev/null 2>&1; then
+    npm install -g pm2
   fi
 }
 
-apt_prepare() {
-  ok "Menyiapkan package dasar..."
-  run apt-get update -y
-  run apt-get install -y curl wget ca-certificates gnupg lsb-release apt-transport-https software-properties-common sudo unzip tar git jq ufw
+write_app_files() {
+  echo -e "${CYAN}Menulis file aplikasi ke ${APP_DIR}...${NC}"
+  if [[ -d "${APP_DIR}" ]]; then
+    BACKUP="${APP_DIR}.bak.$(date +%Y%m%d-%H%M%S)"
+    echo -e "${YELLOW}Folder lama ditemukan. Backup ke ${BACKUP}${NC}"
+    mv "${APP_DIR}" "${BACKUP}"
+  fi
+  mkdir -p "${APP_DIR}/views/partials" "${APP_DIR}/public/css" "${APP_DIR}/public/js"
+
+  cat > "${APP_DIR}/package.json" <<'APPFILE'
+{
+  "name": "stellar-ptero-panel",
+  "version": "1.0.0",
+  "description": "Custom Stellar style web panel for Pterodactyl API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "ejs": "^3.1.10",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.18.1",
+    "helmet": "^8.0.0"
+  }
+}
+APPFILE
+
+  cat > "${APP_DIR}/server.js" <<'APPFILE'
+require('dotenv').config();
+
+const express = require('express');
+const session = require('express-session');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const axios = require('axios');
+const crypto = require('crypto');
+
+const app = express();
+const PORT = Number(process.env.PORT || 3300);
+const APP_NAME = process.env.APP_NAME || 'Stellar Panel';
+const PTERO_URL = (process.env.PTERO_URL || '').replace(/\/$/, '');
+const PTLA_KEY = process.env.PTLA_KEY || '';
+const PTLC_KEY = process.env.PTLC_KEY || '';
+
+if (!PTERO_URL || !PTLA_KEY) {
+  console.error('PTERO_URL dan PTLA_KEY wajib diisi di .env');
+  process.exit(1);
 }
 
-setup_repositories() {
-  ok "Menyiapkan repository sesuai OS..."
+app.set('view engine', 'ejs');
+app.set('views', `${__dirname}/views`);
+app.set('trust proxy', 1);
 
-  if [[ "$OS_ID" == "ubuntu" && "$OS_VERSION" == "22.04" ]]; then
-    run add-apt-repository -y ppa:ondrej/php
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use('/public', express.static(`${__dirname}/public`));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use(express.json({ limit: '2mb' }));
 
-    # Redis official repo, aman untuk Ubuntu 22.04
-    if [[ ! -f /usr/share/keyrings/redis-archive-keyring.gpg ]]; then
-      curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-    fi
-    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb ${OS_CODENAME} main" > /etc/apt/sources.list.d/redis.list
+app.use(rateLimit({ windowMs: 60 * 1000, max: 180, standardHeaders: true, legacyHeaders: false }));
+app.use(session({
+  name: 'stellar.sid',
+  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.COOKIE_SECURE === 'true',
+    maxAge: 1000 * 60 * 60 * 12
+  }
+}));
 
-  elif [[ "$OS_ID" == "debian" ]]; then
-    # PHP Sury repo untuk Debian 12/13
-    echo "deb https://packages.sury.org/php/ ${OS_CODENAME} main" > /etc/apt/sources.list.d/sury-php.list
-    curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/sury-keyring.gpg
-
-    if [[ "$OS_VERSION" == "12" ]]; then
-      # Redis official repo untuk Debian 12
-      if [[ ! -f /usr/share/keyrings/redis-archive-keyring.gpg ]]; then
-        curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-      fi
-      echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb ${OS_CODENAME} main" > /etc/apt/sources.list.d/redis.list
-
-      # MariaDB repo untuk Debian 12 agar versi lebih aman
-      curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | bash
-    fi
-  fi
-
-  run apt-get update -y
+function constantEqual(a, b) {
+  const A = Buffer.from(String(a || ''));
+  const B = Buffer.from(String(b || ''));
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
 }
 
-install_panel_dependencies() {
-  ok "Install dependency Panel..."
-  run apt-get install -y \
-    php${PHP_VER} php${PHP_VER}-common php${PHP_VER}-cli php${PHP_VER}-gd \
-    php${PHP_VER}-mysql php${PHP_VER}-mbstring php${PHP_VER}-bcmath \
-    php${PHP_VER}-xml php${PHP_VER}-fpm php${PHP_VER}-curl php${PHP_VER}-zip \
-    php${PHP_VER}-intl php${PHP_VER}-redis \
-    mariadb-server mariadb-client nginx redis-server certbot python3-certbot-nginx
-
-  run systemctl enable --now mariadb
-  run systemctl enable --now redis-server
-  run systemctl enable --now php${PHP_VER}-fpm
-  run systemctl enable --now nginx
-
-  install_composer
+function auth(req, res, next) {
+  if (req.session && req.session.auth === true) return next();
+  return res.redirect('/login');
 }
 
-install_composer() {
-  if command -v composer >/dev/null 2>&1; then
-    ok "Composer sudah ada: $(composer --version 2>/dev/null || true)"
-    return
-  fi
-
-  ok "Install Composer..."
-  cd /tmp
-  local expected actual
-  expected="$(curl -fsSL https://composer.github.io/installer.sig)"
-  php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-  actual="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
-
-  if [[ "$expected" != "$actual" ]]; then
-    rm -f composer-setup.php
-    err "Signature Composer tidak cocok."
-    exit 1
-  fi
-
-  php composer-setup.php --install-dir=/usr/local/bin --filename=composer
-  rm -f composer-setup.php
-  ok "Composer berhasil diinstall."
+function flash(req, type, message) {
+  req.session.flash = { type, message };
 }
 
-backup_existing_panel() {
-  if [[ -d "$PANEL_DIR" && -n "$(ls -A "$PANEL_DIR" 2>/dev/null || true)" ]]; then
-    warn "Folder $PANEL_DIR sudah ada dan tidak kosong."
-    if confirm "Backup lalu kosongkan folder ini untuk install baru?"; then
-      local backup="/root/pterodactyl-panel-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-      tar -czf "$backup" -C "$PANEL_DIR" . || true
-      ok "Backup dibuat: $backup"
-      rm -rf "${PANEL_DIR:?}/"*
-    else
-      err "Install Panel dibatalkan supaya data lama aman."
-      exit 1
-    fi
-  fi
+app.use((req, res, next) => {
+  res.locals.appName = APP_NAME;
+  res.locals.path = req.path;
+  res.locals.hasPtlc = Boolean(PTLC_KEY);
+  res.locals.pteroUrl = PTERO_URL;
+  res.locals.flash = req.session.flash || null;
+  delete req.session.flash;
+  next();
+});
+
+const appApi = axios.create({
+  baseURL: PTERO_URL,
+  timeout: 30000,
+  headers: {
+    Authorization: `Bearer ${PTLA_KEY}`,
+    Accept: 'application/json',
+    'Content-Type': 'application/json'
+  }
+});
+
+const clientApi = axios.create({
+  baseURL: PTERO_URL,
+  timeout: 30000,
+  headers: {
+    Authorization: `Bearer ${PTLC_KEY}`,
+    Accept: 'application/json',
+    'Content-Type': 'application/json'
+  }
+});
+
+function attrs(item) {
+  return item && item.attributes ? item.attributes : item;
 }
 
-create_database() {
-  ok "Membuat database Panel..."
-
-  mariadb -u root <<SQL
-CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1' WITH GRANT OPTION;
-FLUSH PRIVILEGES;
-SQL
-
-  ok "Database siap."
+function apiError(error) {
+  const detail = error?.response?.data?.errors?.[0]?.detail || error?.response?.data?.message || error.message;
+  return detail || 'Unknown error';
 }
 
-set_env_value() {
-  local file="$1"
-  local key="$2"
-  local value="$3"
-  local escaped
-  escaped="$(printf '%s' "$value" | sed -e 's/[\/&]/\\&/g')"
-
-  if grep -q "^${key}=" "$file"; then
-    sed -i "s|^${key}=.*|${key}=${escaped}|g" "$file"
-  else
-    echo "${key}=${value}" >> "$file"
-  fi
+async function listAll(path) {
+  let page = 1;
+  const out = [];
+  while (true) {
+    const sep = path.includes('?') ? '&' : '?';
+    const { data } = await appApi.get(`${path}${sep}per_page=100&page=${page}`);
+    if (Array.isArray(data.data)) out.push(...data.data.map(attrs));
+    const pagination = data.meta?.pagination;
+    if (!pagination || page >= pagination.total_pages) break;
+    page++;
+  }
+  return out;
 }
 
-download_panel_files() {
-  ok "Download file Panel..."
-  mkdir -p "$PANEL_DIR"
-  cd "$PANEL_DIR"
-
-  curl -L -o panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
-  tar -xzvf panel.tar.gz
-  rm -f panel.tar.gz
-
-  chmod -R 755 storage/* bootstrap/cache/
-  cp .env.example .env
+async function getDashboardData() {
+  const [servers, users, nodes] = await Promise.all([
+    listAll('/api/application/servers?include=user,node'),
+    listAll('/api/application/users'),
+    listAll('/api/application/nodes')
+  ]);
+  return { servers, users, nodes };
 }
 
-configure_panel_env() {
-  ok "Install dependency composer Panel..."
-  cd "$PANEL_DIR"
-  COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
-
-  ok "Generate APP_KEY..."
-  php artisan key:generate --force
-
-  ok "Setup environment Panel..."
-  local env_args
-  env_args=(
-    p:environment:setup
-    "--author=${ADMIN_EMAIL}"
-    "--url=${APP_URL}"
-    "--timezone=${DEFAULT_TZ}"
-    "--cache=redis"
-    "--session=database"
-    "--queue=redis"
-    "--redis-host=127.0.0.1"
-    "--redis-pass=null"
-    "--redis-port=6379"
-  )
-
-  if php artisan p:environment:setup --help | grep -q -- "--settings-ui"; then
-    env_args+=("--settings-ui=1")
-  fi
-
-  if ! php artisan "${env_args[@]}"; then
-    warn "Setup environment otomatis gagal, fallback tulis .env manual."
-    set_env_value .env APP_URL "$APP_URL"
-    set_env_value .env APP_TIMEZONE "$DEFAULT_TZ"
-    set_env_value .env CACHE_DRIVER redis
-    set_env_value .env QUEUE_CONNECTION redis
-    set_env_value .env SESSION_DRIVER database
-    set_env_value .env REDIS_HOST 127.0.0.1
-    set_env_value .env REDIS_PASSWORD null
-    set_env_value .env REDIS_PORT 6379
-  fi
-
-  ok "Setup database environment..."
-  if ! php artisan p:environment:database \
-    --host=127.0.0.1 \
-    --port=3306 \
-    --database="$DB_NAME" \
-    --username="$DB_USER" \
-    --password="$DB_PASS"; then
-    warn "Setup DB otomatis gagal, fallback tulis .env manual."
-    set_env_value .env DB_CONNECTION mysql
-    set_env_value .env DB_HOST 127.0.0.1
-    set_env_value .env DB_PORT 3306
-    set_env_value .env DB_DATABASE "$DB_NAME"
-    set_env_value .env DB_USERNAME "$DB_USER"
-    set_env_value .env DB_PASSWORD "$DB_PASS"
-  fi
-
-  # Mail default dibuat log/mail supaya panel tetap bisa jalan tanpa SMTP.
-  set_env_value .env MAIL_MAILER log
-  set_env_value .env MAIL_DRIVER log
-  set_env_value .env MAIL_FROM "$ADMIN_EMAIL"
-  set_env_value .env MAIL_FROM_ADDRESS "$ADMIN_EMAIL"
-  set_env_value .env MAIL_FROM_NAME Pterodactyl
-
-  ok "Migrasi database dan seed eggs..."
-  php artisan migrate --seed --force
-
-  ok "Membuat user admin..."
-  if ! php artisan p:user:make \
-    --email="$ADMIN_EMAIL" \
-    --username="$ADMIN_USER" \
-    --name-first=Admin \
-    --name-last=User \
-    --password="$ADMIN_PASS" \
-    --admin=1; then
-    warn "User admin mungkin sudah ada. Lewati pembuatan user."
-  fi
-
-  chown -R www-data:www-data "$PANEL_DIR"/*
+async function getEggDetail(nestId, eggId) {
+  const { data } = await appApi.get(`/api/application/nests/${nestId}/eggs/${eggId}?include=variables`);
+  const egg = attrs(data);
+  const vars = data.attributes?.relationships?.variables?.data || data.relationships?.variables?.data || [];
+  const environment = {};
+  for (const v of vars) {
+    const va = attrs(v);
+    if (va.env_variable) environment[va.env_variable] = va.default_value ?? '';
+  }
+  return { egg, environment };
 }
 
-setup_queue_and_cron() {
-  ok "Setup cron scheduler dan queue worker..."
+function firstDockerImage(egg) {
+  if (egg.docker_image) return egg.docker_image;
+  if (egg.docker_images && typeof egg.docker_images === 'object') return Object.values(egg.docker_images)[0];
+  return 'ghcr.io/pterodactyl/yolks:nodejs_20';
+}
 
-  cat > /etc/cron.d/pterodactyl-schedule <<EOF
-* * * * * www-data php ${PANEL_DIR}/artisan schedule:run >> /dev/null 2>&1
+app.get('/login', (req, res) => {
+  if (req.session.auth) return res.redirect('/dashboard');
+  res.render('login');
+});
+
+app.post('/login', (req, res) => {
+  const okUser = constantEqual(req.body.username, process.env.ADMIN_USERNAME || 'admin');
+  const okPass = constantEqual(req.body.password, process.env.ADMIN_PASSWORD || 'admin');
+  if (!okUser || !okPass) {
+    flash(req, 'danger', 'Username atau password salah.');
+    return res.redirect('/login');
+  }
+  req.session.auth = true;
+  req.session.user = req.body.username;
+  res.redirect('/dashboard');
+});
+
+app.post('/logout', auth, (req, res) => {
+  req.session.destroy(() => res.redirect('/login'));
+});
+
+app.get('/', auth, (req, res) => res.redirect('/dashboard'));
+
+app.get('/dashboard', auth, async (req, res) => {
+  try {
+    const { servers, users, nodes } = await getDashboardData();
+    res.render('dashboard', { servers, users, nodes });
+  } catch (error) {
+    res.render('error', { title: 'Dashboard error', message: apiError(error) });
+  }
+});
+
+app.get('/servers', auth, async (req, res) => {
+  try {
+    const servers = await listAll('/api/application/servers?include=user,node');
+    res.render('servers', { servers });
+  } catch (error) {
+    res.render('error', { title: 'Server error', message: apiError(error) });
+  }
+});
+
+app.post('/servers/:identifier/power', auth, async (req, res) => {
+  try {
+    if (!PTLC_KEY) throw new Error('PTLC_KEY belum diisi. Power action butuh Client API key.');
+    const signal = String(req.body.signal || '').toLowerCase();
+    if (!['start', 'stop', 'restart', 'kill'].includes(signal)) throw new Error('Signal tidak valid.');
+    await clientApi.post(`/api/client/servers/${req.params.identifier}/power`, { signal });
+    flash(req, 'success', `Power signal ${signal} terkirim.`);
+  } catch (error) {
+    flash(req, 'danger', apiError(error));
+  }
+  res.redirect('/servers');
+});
+
+app.post('/servers/:id/suspend', auth, async (req, res) => {
+  try {
+    await appApi.post(`/api/application/servers/${req.params.id}/suspend`);
+    flash(req, 'success', 'Server berhasil disuspend.');
+  } catch (error) { flash(req, 'danger', apiError(error)); }
+  res.redirect('/servers');
+});
+
+app.post('/servers/:id/unsuspend', auth, async (req, res) => {
+  try {
+    await appApi.post(`/api/application/servers/${req.params.id}/unsuspend`);
+    flash(req, 'success', 'Server berhasil diunsuspend.');
+  } catch (error) { flash(req, 'danger', apiError(error)); }
+  res.redirect('/servers');
+});
+
+app.post('/servers/:id/delete', auth, async (req, res) => {
+  try {
+    await appApi.delete(`/api/application/servers/${req.params.id}/force`);
+    flash(req, 'success', 'Server berhasil dihapus paksa.');
+  } catch (error) { flash(req, 'danger', apiError(error)); }
+  res.redirect('/servers');
+});
+
+app.get('/create-server', auth, async (req, res) => {
+  try {
+    const [users, nodes] = await Promise.all([
+      listAll('/api/application/users'),
+      listAll('/api/application/nodes')
+    ]);
+    res.render('create-server', { users, nodes });
+  } catch (error) {
+    res.render('error', { title: 'Create server error', message: apiError(error) });
+  }
+});
+
+app.post('/servers/create', auth, async (req, res) => {
+  try {
+    const nestId = Number(req.body.nest_id);
+    const eggId = Number(req.body.egg_id);
+    if (!nestId || !eggId) throw new Error('Nest ID dan Egg ID wajib diisi.');
+
+    const { egg, environment: envDefault } = await getEggDetail(nestId, eggId);
+    let envExtra = {};
+    if (String(req.body.env_json || '').trim()) {
+      envExtra = JSON.parse(req.body.env_json);
+    }
+    const environment = { ...envDefault, ...envExtra };
+
+    const payload = {
+      name: req.body.name,
+      user: Number(req.body.user_id),
+      egg: eggId,
+      docker_image: req.body.docker_image || firstDockerImage(egg),
+      startup: req.body.startup || egg.startup || 'npm start',
+      environment,
+      limits: {
+        memory: Number(req.body.memory || 1024),
+        swap: Number(req.body.swap || 0),
+        disk: Number(req.body.disk || 1024),
+        io: Number(req.body.io || 500),
+        cpu: Number(req.body.cpu || 100)
+      },
+      feature_limits: {
+        databases: Number(req.body.databases || 0),
+        allocations: Number(req.body.allocations || 0),
+        backups: Number(req.body.backups || 0)
+      },
+      allocation: {
+        default: Number(req.body.allocation_id)
+      }
+    };
+
+    await appApi.post('/api/application/servers', payload);
+    flash(req, 'success', 'Server berhasil dibuat.');
+    res.redirect('/servers');
+  } catch (error) {
+    flash(req, 'danger', apiError(error));
+    res.redirect('/create-server');
+  }
+});
+
+app.get('/users', auth, async (req, res) => {
+  try {
+    const users = await listAll('/api/application/users');
+    res.render('users', { users });
+  } catch (error) {
+    res.render('error', { title: 'Users error', message: apiError(error) });
+  }
+});
+
+app.post('/users/create', auth, async (req, res) => {
+  try {
+    await appApi.post('/api/application/users', {
+      email: req.body.email,
+      username: req.body.username,
+      first_name: req.body.first_name || req.body.username,
+      last_name: req.body.last_name || 'User',
+      password: req.body.password
+    });
+    flash(req, 'success', 'User berhasil dibuat.');
+  } catch (error) { flash(req, 'danger', apiError(error)); }
+  res.redirect('/users');
+});
+
+app.post('/users/:id/delete', auth, async (req, res) => {
+  try {
+    await appApi.delete(`/api/application/users/${req.params.id}`);
+    flash(req, 'success', 'User berhasil dihapus.');
+  } catch (error) { flash(req, 'danger', apiError(error)); }
+  res.redirect('/users');
+});
+
+app.get('/nodes', auth, async (req, res) => {
+  try {
+    const nodes = await listAll('/api/application/nodes');
+    res.render('nodes', { nodes });
+  } catch (error) {
+    res.render('error', { title: 'Nodes error', message: apiError(error) });
+  }
+});
+
+app.get('/eggs', auth, async (req, res) => {
+  try {
+    const nests = await listAll('/api/application/nests');
+    const groups = [];
+    for (const nest of nests) {
+      const eggs = await listAll(`/api/application/nests/${nest.id}/eggs?include=variables`);
+      groups.push({ nest, eggs });
+    }
+    res.render('eggs', { groups });
+  } catch (error) {
+    res.render('error', { title: 'Eggs error', message: apiError(error) });
+  }
+});
+
+app.get('/settings', auth, (req, res) => {
+  res.render('settings', {
+    config: {
+      PTERO_URL,
+      PTLA_KEY: PTLA_KEY ? `${PTLA_KEY.slice(0, 12)}••••••••` : 'kosong',
+      PTLC_KEY: PTLC_KEY ? `${PTLC_KEY.slice(0, 12)}••••••••` : 'kosong',
+      PORT,
+      COOKIE_SECURE: process.env.COOKIE_SECURE === 'true'
+    }
+  });
+});
+
+app.get('/health', (req, res) => res.json({ ok: true, app: APP_NAME }));
+
+app.use((req, res) => res.status(404).render('error', { title: '404', message: 'Halaman tidak ditemukan.' }));
+
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`${APP_NAME} running on http://127.0.0.1:${PORT}`);
+});
+APPFILE
+
+  cat > "${APP_DIR}/views/partials/header.ejs" <<'APPFILE'
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= appName %></title>
+  <link rel="stylesheet" href="/public/css/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-orb"></div>
+      <div>
+        <b><%= appName %></b>
+        <span>Custom Ptero Engine</span>
+      </div>
+    </div>
+    <nav>
+      <a class="<%= path === '/dashboard' ? 'active' : '' %>" href="/dashboard">Dashboard</a>
+      <a class="<%= path === '/servers' ? 'active' : '' %>" href="/servers">Servers</a>
+      <a class="<%= path === '/create-server' ? 'active' : '' %>" href="/create-server">Create Server</a>
+      <a class="<%= path === '/users' ? 'active' : '' %>" href="/users">Users</a>
+      <a class="<%= path === '/nodes' ? 'active' : '' %>" href="/nodes">Nodes</a>
+      <a class="<%= path === '/eggs' ? 'active' : '' %>" href="/eggs">Eggs</a>
+      <a class="<%= path === '/settings' ? 'active' : '' %>" href="/settings">Settings</a>
+    </nav>
+    <form method="post" action="/logout" class="logout"><button>Logout</button></form>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <p class="muted">Connected to</p>
+        <h2><%= pteroUrl %></h2>
+      </div>
+      <div class="pill <%= hasPtlc ? 'ok' : 'warn' %>"><%= hasPtlc ? 'PTLC Ready' : 'PTLC Missing' %></div>
+    </div>
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.message %></div>
+    <% } %>
+APPFILE
+
+  cat > "${APP_DIR}/views/partials/footer.ejs" <<'APPFILE'
+  </main>
+</div>
+<script src="/public/js/app.js"></script>
+</body>
+</html>
+APPFILE
+
+  cat > "${APP_DIR}/views/login.ejs" <<'APPFILE'
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login - <%= appName %></title>
+  <link rel="stylesheet" href="/public/css/style.css">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="brand login-brand"><div class="brand-orb"></div><div><b><%= appName %></b><span>Stellar custom panel</span></div></div>
+    <% if (flash) { %><div class="alert <%= flash.type %>"><%= flash.message %></div><% } %>
+    <form method="post" action="/login" class="form">
+      <label>Username</label>
+      <input name="username" required autocomplete="username">
+      <label>Password</label>
+      <input name="password" type="password" required autocomplete="current-password">
+      <button class="btn primary full">Masuk Dashboard</button>
+    </form>
+    <p class="muted center">Web ini bukan tampilan Pterodactyl bawaan. Ini frontend custom yang memakai API Pterodactyl.</p>
+  </div>
+</body>
+</html>
+APPFILE
+
+  cat > "${APP_DIR}/views/dashboard.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="hero">
+  <div>
+    <p class="eyebrow">STELLAR COMMAND CENTER</p>
+    <h1>Panel custom aktif.</h1>
+    <p>Kelola engine Pterodactyl dari tampilan web yang beda total.</p>
+  </div>
+  <a href="/create-server" class="btn primary">Create Server</a>
+</section>
+
+<section class="grid stats">
+  <div class="card stat"><span>Total Servers</span><b><%= servers.length %></b></div>
+  <div class="card stat"><span>Total Users</span><b><%= users.length %></b></div>
+  <div class="card stat"><span>Total Nodes</span><b><%= nodes.length %></b></div>
+  <div class="card stat"><span>Power API</span><b><%= hasPtlc ? 'Ready' : 'Off' %></b></div>
+</section>
+
+<section class="card">
+  <div class="card-head"><h3>Recent Servers</h3><a href="/servers">Lihat semua</a></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>Name</th><th>Identifier</th><th>Status</th><th>Limits</th></tr></thead>
+      <tbody>
+      <% servers.slice(0, 8).forEach(s => { %>
+        <tr>
+          <td>#<%= s.id %></td>
+          <td><%= s.name %></td>
+          <td><code><%= s.identifier %></code></td>
+          <td><span class="badge <%= s.suspended ? 'danger' : 'ok' %>"><%= s.suspended ? 'Suspended' : 'Active' %></span></td>
+          <td><%= s.limits?.memory || 0 %>MB / <%= s.limits?.disk || 0 %>MB / <%= s.limits?.cpu || 0 %>%</td>
+        </tr>
+      <% }) %>
+      </tbody>
+    </table>
+  </div>
+</section>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/views/servers.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="page-title"><h1>Servers</h1><a href="/create-server" class="btn primary">Create Server</a></section>
+<section class="card">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>Name</th><th>Identifier</th><th>Status</th><th>Limits</th><th>Power</th><th>Admin</th></tr></thead>
+      <tbody>
+      <% servers.forEach(s => { %>
+        <tr>
+          <td>#<%= s.id %></td>
+          <td><%= s.name %></td>
+          <td><code><%= s.identifier %></code></td>
+          <td><span class="badge <%= s.suspended ? 'danger' : 'ok' %>"><%= s.suspended ? 'Suspended' : 'Active' %></span></td>
+          <td><%= s.limits?.memory || 0 %>MB / <%= s.limits?.disk || 0 %>MB / CPU <%= s.limits?.cpu || 0 %>%</td>
+          <td class="actions">
+            <% ['start','restart','stop','kill'].forEach(sig => { %>
+              <form method="post" action="/servers/<%= s.identifier %>/power"><input type="hidden" name="signal" value="<%= sig %>"><button class="mini" <%= hasPtlc ? '' : 'disabled' %>><%= sig %></button></form>
+            <% }) %>
+          </td>
+          <td class="actions">
+            <% if (s.suspended) { %>
+              <form method="post" action="/servers/<%= s.id %>/unsuspend"><button class="mini ok">Unsuspend</button></form>
+            <% } else { %>
+              <form method="post" action="/servers/<%= s.id %>/suspend"><button class="mini warn">Suspend</button></form>
+            <% } %>
+            <form method="post" action="/servers/<%= s.id %>/delete" onsubmit="return confirm('Hapus server ini?')"><button class="mini danger">Delete</button></form>
+          </td>
+        </tr>
+      <% }) %>
+      </tbody>
+    </table>
+  </div>
+</section>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/views/create-server.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="page-title"><h1>Create Server</h1><a href="/eggs" class="btn ghost">Lihat Egg ID</a></section>
+<section class="card">
+  <form method="post" action="/servers/create" class="form grid-form">
+    <div><label>Nama Server</label><input name="name" required placeholder="Server WhatsApp Bot"></div>
+    <div><label>User</label><select name="user_id" required><% users.forEach(u => { %><option value="<%= u.id %>">#<%= u.id %> - <%= u.username %> / <%= u.email %></option><% }) %></select></div>
+    <div><label>Node</label><select name="node_id" required><% nodes.forEach(n => { %><option value="<%= n.id %>">#<%= n.id %> - <%= n.name %></option><% }) %></select></div>
+    <div><label>Allocation ID</label><input name="allocation_id" type="number" required placeholder="contoh 12"></div>
+    <div><label>Nest ID</label><input name="nest_id" type="number" required placeholder="lihat halaman Eggs"></div>
+    <div><label>Egg ID</label><input name="egg_id" type="number" required placeholder="lihat halaman Eggs"></div>
+    <div><label>Memory MB</label><input name="memory" type="number" value="1024" required></div>
+    <div><label>Disk MB</label><input name="disk" type="number" value="1024" required></div>
+    <div><label>CPU %</label><input name="cpu" type="number" value="100" required></div>
+    <div><label>Swap</label><input name="swap" type="number" value="0"></div>
+    <div><label>IO</label><input name="io" type="number" value="500"></div>
+    <div><label>Databases</label><input name="databases" type="number" value="0"></div>
+    <div><label>Backups</label><input name="backups" type="number" value="0"></div>
+    <div><label>Extra Allocations</label><input name="allocations" type="number" value="0"></div>
+    <div><label>Docker Image opsional</label><input name="docker_image" placeholder="kosongkan agar ambil dari egg"></div>
+    <div><label>Startup opsional</label><input name="startup" placeholder="kosongkan agar ambil dari egg"></div>
+    <div class="wide"><label>Environment JSON opsional</label><textarea name="env_json" rows="7" placeholder='{"BOT_TOKEN":"xxx","CMD_RUN":"npm start"}'></textarea></div>
+    <div class="wide"><button class="btn primary">Buat Server</button></div>
+  </form>
+  <p class="muted">Catatan: allocation ID bisa dilihat dari Panel Pterodactyl asli atau API. Versi awal ini sengaja aman, tidak menjalankan command bebas dari web.</p>
+</section>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/views/users.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="page-title"><h1>Users</h1></section>
+<section class="card form-card">
+  <h3>Create User</h3>
+  <form method="post" action="/users/create" class="form grid-form small">
+    <div><label>Email</label><input name="email" type="email" required></div>
+    <div><label>Username</label><input name="username" required></div>
+    <div><label>First name</label><input name="first_name"></div>
+    <div><label>Last name</label><input name="last_name"></div>
+    <div><label>Password</label><input name="password" required></div>
+    <div><button class="btn primary">Create</button></div>
+  </form>
+</section>
+<section class="card">
+  <div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Name</th><th>Action</th></tr></thead>
+    <tbody><% users.forEach(u => { %><tr><td>#<%= u.id %></td><td><%= u.username %></td><td><%= u.email %></td><td><%= u.first_name %> <%= u.last_name %></td><td><form method="post" action="/users/<%= u.id %>/delete" onsubmit="return confirm('Hapus user?')"><button class="mini danger">Delete</button></form></td></tr><% }) %></tbody>
+  </table></div>
+</section>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/views/nodes.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="page-title"><h1>Nodes</h1></section>
+<section class="grid cards">
+  <% nodes.forEach(n => { %>
+    <div class="card node-card">
+      <span class="badge ok">#<%= n.id %></span>
+      <h3><%= n.name %></h3>
+      <p><%= n.fqdn %></p>
+      <div class="mini-grid"><span>Memory</span><b><%= n.memory %> MB</b><span>Disk</span><b><%= n.disk %> MB</b><span>Scheme</span><b><%= n.scheme %></b></div>
+    </div>
+  <% }) %>
+</section>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/views/eggs.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="page-title"><h1>Eggs & Nests</h1></section>
+<% groups.forEach(g => { %>
+<section class="card">
+  <div class="card-head"><h3>Nest #<%= g.nest.id %> - <%= g.nest.name %></h3><span class="badge"><%= g.eggs.length %> eggs</span></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Egg ID</th><th>Name</th><th>Docker</th><th>Startup</th></tr></thead>
+    <tbody><% g.eggs.forEach(e => { %><tr><td><code><%= e.id %></code></td><td><%= e.name %></td><td><code><%= e.docker_image || (e.docker_images ? Object.values(e.docker_images)[0] : '-') %></code></td><td><code><%= e.startup || '-' %></code></td></tr><% }) %></tbody>
+  </table></div>
+</section>
+<% }) %>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/views/settings.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="page-title"><h1>Settings</h1></section>
+<section class="card">
+  <div class="kv"><span>Pterodactyl URL</span><b><%= config.PTERO_URL %></b></div>
+  <div class="kv"><span>PTLA Key</span><b><%= config.PTLA_KEY %></b></div>
+  <div class="kv"><span>PTLC Key</span><b><%= config.PTLC_KEY %></b></div>
+  <div class="kv"><span>App Port</span><b><%= config.PORT %></b></div>
+  <div class="kv"><span>Secure Cookie</span><b><%= config.COOKIE_SECURE %></b></div>
+  <p class="muted">Untuk ubah setting, edit file <code>/opt/stellar-ptero-panel/.env</code> lalu jalankan <code>pm2 restart stellar-ptero-panel</code>.</p>
+</section>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/views/error.ejs" <<'APPFILE'
+<%- include('partials/header') %>
+<section class="card error-card">
+  <h1><%= title %></h1>
+  <p><%= message %></p>
+  <a class="btn ghost" href="/dashboard">Kembali</a>
+</section>
+<%- include('partials/footer') %>
+APPFILE
+
+  cat > "${APP_DIR}/public/css/style.css" <<'APPFILE'
+:root{--bg:#070813;--panel:rgba(17,20,40,.78);--panel2:rgba(30,35,65,.7);--text:#f6f7ff;--muted:#99a2c7;--line:rgba(255,255,255,.1);--accent:#f59e0b;--accent2:#8b5cf6;--good:#22c55e;--bad:#ef4444;--warn:#f97316}*{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Arial;background:radial-gradient(circle at 10% 10%,rgba(139,92,246,.28),transparent 32%),radial-gradient(circle at 90% 0,rgba(245,158,11,.22),transparent 28%),linear-gradient(135deg,#050611,#11152c 55%,#050611);color:var(--text);min-height:100vh}a{color:inherit;text-decoration:none}.shell{display:grid;grid-template-columns:280px 1fr;min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:22px;border-right:1px solid var(--line);background:rgba(5,7,18,.72);backdrop-filter:blur(18px)}.brand{display:flex;gap:12px;align-items:center;margin-bottom:26px}.brand b{display:block;font-size:17px}.brand span,.muted{color:var(--muted);font-size:13px}.brand-orb{width:42px;height:42px;border-radius:18px;background:conic-gradient(from 180deg,var(--accent),var(--accent2),#06b6d4,var(--accent));box-shadow:0 0 34px rgba(245,158,11,.45)}nav{display:grid;gap:9px}nav a,.logout button{border:1px solid transparent;padding:12px 14px;border-radius:16px;color:var(--muted);background:transparent;text-align:left;font-weight:700;cursor:pointer}nav a:hover,nav a.active,.logout button:hover{background:linear-gradient(135deg,rgba(245,158,11,.18),rgba(139,92,246,.15));border-color:var(--line);color:var(--text)}.logout{position:absolute;bottom:22px;left:22px;right:22px}.logout button{width:100%}.main{padding:28px;overflow:auto}.topbar,.hero,.page-title,.card-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.topbar{margin-bottom:22px}.topbar h2{margin:0;font-size:18px}.topbar p{margin:0 0 4px}.hero{padding:30px;border:1px solid var(--line);border-radius:28px;background:linear-gradient(135deg,rgba(245,158,11,.16),rgba(139,92,246,.13));box-shadow:0 24px 90px rgba(0,0,0,.25);margin-bottom:22px}.hero h1,.page-title h1{font-size:36px;margin:0 0 6px}.hero p{margin:0;color:var(--muted)}.eyebrow{font-size:12px;letter-spacing:.19em;color:#fbbf24!important;font-weight:900}.grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px}.cards{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}.card{border:1px solid var(--line);border-radius:24px;background:var(--panel);backdrop-filter:blur(18px);padding:18px;box-shadow:0 24px 70px rgba(0,0,0,.22);margin-bottom:16px}.stat span{color:var(--muted);font-weight:700}.stat b{font-size:34px;display:block;margin-top:8px}.btn,button{border:0;border-radius:14px;padding:11px 15px;font-weight:900;cursor:pointer}.btn.primary,.primary{background:linear-gradient(135deg,var(--accent),#fb7185,var(--accent2));color:#fff;box-shadow:0 10px 30px rgba(245,158,11,.25)}.btn.ghost{border:1px solid var(--line);background:rgba(255,255,255,.05)}.full{width:100%}.pill,.badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:900;background:rgba(255,255,255,.08);border:1px solid var(--line)}.ok{color:#86efac}.warn{color:#fdba74}.danger{color:#fca5a5}.badge.ok,.pill.ok{background:rgba(34,197,94,.13)}.badge.danger{background:rgba(239,68,68,.13)}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:820px}th,td{text-align:left;padding:13px 10px;border-bottom:1px solid var(--line);vertical-align:middle}th{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}code{background:rgba(0,0,0,.25);padding:3px 7px;border-radius:8px;color:#fde68a}.actions{display:flex;flex-wrap:wrap;gap:6px}.mini{padding:7px 9px;border-radius:10px;background:rgba(255,255,255,.08);color:var(--text);border:1px solid var(--line)}.mini:disabled{opacity:.35;cursor:not-allowed}.form{display:grid;gap:12px}.form label{font-weight:900;color:var(--muted);font-size:13px}.form input,.form select,.form textarea{width:100%;border:1px solid var(--line);background:rgba(0,0,0,.24);color:var(--text);border-radius:14px;padding:12px;outline:none}.grid-form{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-form.small{grid-template-columns:repeat(3,minmax(0,1fr))}.wide{grid-column:1/-1}.alert{padding:13px 15px;border-radius:16px;margin-bottom:16px;border:1px solid var(--line);background:rgba(255,255,255,.07);font-weight:800}.alert.success{color:#86efac}.alert.danger{color:#fca5a5}.login-body{display:grid;place-items:center;padding:22px}.login-card{width:min(440px,100%);border:1px solid var(--line);background:rgba(10,13,30,.78);border-radius:30px;padding:28px;box-shadow:0 30px 120px rgba(0,0,0,.4);backdrop-filter:blur(20px)}.login-brand{margin-bottom:20px}.center{text-align:center}.kv{display:flex;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid var(--line)}.kv span{color:var(--muted)}.node-card h3{margin:14px 0 6px}.node-card p{color:var(--muted)}.mini-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px}.mini-grid span{color:var(--muted)}.error-card h1{margin-top:0}@media(max-width:900px){.shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.logout{position:relative;left:auto;right:auto;bottom:auto;margin-top:20px}.stats{grid-template-columns:repeat(2,1fr)}.grid-form,.grid-form.small{grid-template-columns:1fr}.topbar,.hero,.page-title{align-items:flex-start;flex-direction:column}.hero h1,.page-title h1{font-size:28px}}
+APPFILE
+
+  cat > "${APP_DIR}/public/js/app.js" <<'APPFILE'
+document.querySelectorAll('form[action$="/power"] button').forEach(btn=>{btn.addEventListener('click',()=>{btn.textContent='Sending...';});});
+APPFILE
+
+  cat > "${APP_DIR}/ecosystem.config.js" <<'APPFILE'
+module.exports = {
+  apps: [{
+    name: 'stellar-ptero-panel',
+    script: 'server.js',
+    cwd: '/opt/stellar-ptero-panel',
+    instances: 1,
+    autorestart: true,
+    watch: false,
+    max_memory_restart: '350M',
+    env: { NODE_ENV: 'production' }
+  }]
+};
+APPFILE
+}
+
+write_env() {
+  SESSION_SECRET="$(cat /proc/sys/kernel/random/uuid | tr -d '-')$(cat /proc/sys/kernel/random/uuid | tr -d '-')"
+  cat > "${APP_DIR}/.env" <<EOF
+APP_NAME=Stellar Panel
+PORT=${APP_PORT}
+PTERO_URL=${PTERO_URL}
+PTLA_KEY=${PTLA_KEY}
+PTLC_KEY=${PTLC_KEY}
+ADMIN_USERNAME=${ADMIN_USERNAME}
+ADMIN_PASSWORD=${ADMIN_PASSWORD}
+SESSION_SECRET=${SESSION_SECRET}
+COOKIE_SECURE=true
 EOF
-
-  cat > /etc/systemd/system/pteroq.service <<EOF
-[Unit]
-Description=Pterodactyl Queue Worker
-After=redis-server.service
-
-[Service]
-User=www-data
-Group=www-data
-Restart=always
-ExecStart=/usr/bin/php ${PANEL_DIR}/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
-StartLimitInterval=180
-StartLimitBurst=30
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable --now pteroq
-  ok "Queue worker aktif."
+  chmod 600 "${APP_DIR}/.env"
 }
 
-write_nginx_http_config() {
-  local domain="$1"
+install_node_modules() {
+  echo -e "${CYAN}Install module Node.js...${NC}"
+  cd "${APP_DIR}"
+  npm install --omit=dev
+}
 
-  rm -f /etc/nginx/sites-enabled/default || true
+setup_pm2() {
+  echo -e "${CYAN}Setup PM2...${NC}"
+  pm2 delete stellar-ptero-panel >/dev/null 2>&1 || true
+  pm2 start "${APP_DIR}/ecosystem.config.js"
+  pm2 save
+  pm2 startup systemd -u root --hp /root >/tmp/stellar-pm2-startup.log 2>&1 || true
+}
 
-  cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
+setup_nginx() {
+  echo -e "${CYAN}Setup Nginx reverse proxy...${NC}"
+  cat > "/etc/nginx/sites-available/stellar-ptero-panel" <<EOF
 server {
     listen 80;
-    server_name ${domain};
+    server_name ${CUSTOM_DOMAIN};
 
-    root ${PANEL_DIR}/public;
-    index index.php index.html index.htm;
-    charset utf-8;
-
-    access_log /var/log/nginx/pterodactyl.app-access.log;
-    error_log  /var/log/nginx/pterodactyl.app-error.log error;
-
-    client_max_body_size 100m;
-    client_body_timeout 120s;
-    sendfile off;
+    client_max_body_size 50m;
 
     location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
-
-    location ~ \.php$ {
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param HTTP_PROXY "";
-        fastcgi_intercept_errors off;
-        fastcgi_buffer_size 16k;
-        fastcgi_buffers 4 16k;
-        fastcgi_connect_timeout 300;
-        fastcgi_send_timeout 300;
-        fastcgi_read_timeout 300;
-    }
-
-    location ~ /\.ht {
-        deny all;
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
     }
 }
 EOF
-
-  ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
+  ln -sf /etc/nginx/sites-available/stellar-ptero-panel /etc/nginx/sites-enabled/stellar-ptero-panel
   nginx -t
   systemctl reload nginx
 }
 
-write_nginx_ssl_config() {
-  local domain="$1"
-
-  cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
-server {
-    listen 80;
-    server_name ${domain};
-    return 301 https://\$server_name\$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name ${domain};
-
-    root ${PANEL_DIR}/public;
-    index index.php;
-    charset utf-8;
-
-    access_log /var/log/nginx/pterodactyl.app-access.log;
-    error_log  /var/log/nginx/pterodactyl.app-error.log error;
-
-    client_max_body_size 100m;
-    client_body_timeout 120s;
-    sendfile off;
-
-    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
-    ssl_session_cache shared:SSL:10m;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
-    add_header X-Robots-Tag none;
-    add_header Content-Security-Policy "frame-ancestors 'self'";
-    add_header X-Frame-Options DENY;
-    add_header Referrer-Policy same-origin;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php$ {
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param HTTP_PROXY "";
-        fastcgi_intercept_errors off;
-        fastcgi_buffer_size 16k;
-        fastcgi_buffers 4 16k;
-        fastcgi_connect_timeout 300;
-        fastcgi_send_timeout 300;
-        fastcgi_read_timeout 300;
-        include /etc/nginx/fastcgi_params;
-    }
-
-    location ~ /\.ht {
-        deny all;
-    }
-}
-EOF
-
-  ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
-  nginx -t
-  systemctl reload nginx
-}
-
-setup_nginx_and_ssl() {
-  ok "Setup Nginx Panel..."
-  write_nginx_http_config "$PANEL_DOMAIN"
-
-  if [[ "$SSL_MODE" =~ ^[Yy] || "$SSL_MODE" == "yes" ]]; then
-    ok "Request SSL Let's Encrypt..."
-    if certbot certonly --nginx -d "$PANEL_DOMAIN" --non-interactive --agree-tos -m "$ADMIN_EMAIL"; then
-      write_nginx_ssl_config "$PANEL_DOMAIN"
-      set_env_value "$PANEL_DIR/.env" APP_URL "https://${PANEL_DOMAIN}"
-      ok "SSL aktif untuk ${PANEL_DOMAIN}"
-    else
-      warn "SSL gagal. Panel tetap jalan mode HTTP. Pastikan DNS domain mengarah ke IP VPS dan port 80/443 terbuka."
-      set_env_value "$PANEL_DIR/.env" APP_URL "http://${PANEL_DOMAIN}"
-      write_nginx_http_config "$PANEL_DOMAIN"
-    fi
-  fi
-
-  systemctl restart nginx
-}
-
-open_firewall_basic() {
-  ok "Membuka port dasar firewall jika UFW aktif/tersedia..."
-
-  if command -v ufw >/dev/null 2>&1; then
-    ufw allow OpenSSH || true
-    ufw allow 22/tcp || true
-    ufw allow 80/tcp || true
-    ufw allow 443/tcp || true
-    ufw allow 8080/tcp || true
-    ufw allow 2022/tcp || true
-    ok "Port dibuka: 22, 80, 443, 8080, 2022"
+setup_ssl() {
+  echo ""
+  read -rp "Pasang SSL Let's Encrypt sekarang? (y/N): " SSL_ASK
+  if [[ "${SSL_ASK,,}" == "y" ]]; then
+    read -rp "Email untuk SSL: " SSL_EMAIL
+    certbot --nginx -d "${CUSTOM_DOMAIN}" --non-interactive --agree-tos -m "${SSL_EMAIL}" --redirect
+    systemctl reload nginx
   fi
 }
 
-install_panel() {
+finish() {
+  echo ""
+  echo -e "${GREEN}Install selesai.${NC}"
+  echo -e "Web custom: ${CYAN}https://${CUSTOM_DOMAIN}${NC}"
+  echo -e "User admin: ${CYAN}${ADMIN_USERNAME}${NC}"
+  echo -e "Password: ${CYAN}${ADMIN_PASSWORD}${NC}"
+  echo ""
+  echo "Command penting:"
+  echo "pm2 status"
+  echo "pm2 logs stellar-ptero-panel"
+  echo "pm2 restart stellar-ptero-panel"
+  echo "nano ${APP_DIR}/.env"
+}
+
+main() {
   banner
-  need_root
-  need_systemd
-  detect_os
-  prompt_panel_data
-  apt_prepare
-  setup_repositories
-  install_panel_dependencies
-  backup_existing_panel
-  create_database
-  download_panel_files
-  configure_panel_env
-  setup_queue_and_cron
-  setup_nginx_and_ssl
-  open_firewall_basic
-  panel_summary
+  check_root
+  check_os
+  ask_config
+  install_packages
+  write_app_files
+  write_env
+  install_node_modules
+  setup_pm2
+  setup_nginx
+  setup_ssl
+  finish
 }
 
-check_virtualization_for_wings() {
-  local virt
-  virt="$(systemd-detect-virt 2>/dev/null || true)"
-
-  if [[ "$virt" =~ openvz|lxc|lxc-libvirt ]]; then
-    warn "Virtualisasi terdeteksi: $virt"
-    warn "Wings/Docker sering gagal di OpenVZ/LXC."
-    if ! confirm "Tetap lanjut install Wings?"; then
-      exit 1
-    fi
-  else
-    ok "Virtualisasi terdeteksi: ${virt:-none}. Lanjut Wings."
-  fi
-}
-
-install_docker() {
-  if command -v docker >/dev/null 2>&1; then
-    ok "Docker sudah ada: $(docker --version)"
-  else
-    ok "Install Docker..."
-    curl -sSL https://get.docker.com/ | CHANNEL=stable bash
-  fi
-
-  systemctl enable --now docker
-}
-
-download_wings() {
-  ok "Download Wings binary..."
-  local arch
-  case "$(uname -m)" in
-    x86_64|amd64)
-      arch="amd64"
-      ;;
-    aarch64|arm64)
-      arch="arm64"
-      ;;
-    *)
-      err "Arsitektur tidak support untuk auto download Wings: $(uname -m)"
-      exit 1
-      ;;
-  esac
-
-  mkdir -p /etc/pterodactyl
-  curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_${arch}"
-  chmod u+x /usr/local/bin/wings
-  ok "Wings terpasang di /usr/local/bin/wings"
-}
-
-create_wings_service() {
-  ok "Membuat wings.service..."
-
-  cat > /etc/systemd/system/wings.service <<'EOF'
-[Unit]
-Description=Pterodactyl Wings Daemon
-After=docker.service
-Requires=docker.service
-PartOf=docker.service
-
-[Service]
-User=root
-WorkingDirectory=/etc/pterodactyl
-LimitNOFILE=4096
-PIDFile=/var/run/wings/daemon.pid
-ExecStart=/usr/local/bin/wings
-Restart=on-failure
-StartLimitInterval=180
-StartLimitBurst=30
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable wings
-}
-
-paste_wings_config() {
-  banner
-  need_root
-  mkdir -p /etc/pterodactyl
-
-  echo -e "${YELLOW}Paste config.yml Wings dari Panel.${NC}"
-  echo "Di Panel: Admin Area > Nodes > pilih node > Configuration"
-  echo "Paste semuanya di bawah ini."
-  echo "Kalau sudah selesai, tekan CTRL+D."
-  echo ""
-
-  cat > /etc/pterodactyl/config.yml
-
-  if [[ ! -s /etc/pterodactyl/config.yml ]]; then
-    warn "config.yml kosong, tidak disimpan."
-    rm -f /etc/pterodactyl/config.yml
-    return
-  fi
-
-  chmod 600 /etc/pterodactyl/config.yml
-  ok "Config tersimpan: /etc/pterodactyl/config.yml"
-
-  if systemctl list-unit-files | grep -q '^wings.service'; then
-    systemctl restart wings || true
-    systemctl status wings --no-pager || true
-  fi
-}
-
-install_wings() {
-  banner
-  need_root
-  need_systemd
-  detect_os
-  apt_prepare
-  check_virtualization_for_wings
-  install_docker
-  download_wings
-  create_wings_service
-  open_firewall_basic
-
-  echo ""
-  if confirm "Mau paste config.yml Wings sekarang?"; then
-    paste_wings_config
-  else
-    warn "Wings belum bisa running normal sebelum /etc/pterodactyl/config.yml diisi dari Panel."
-  fi
-
-  wings_summary
-}
-
-repair_panel() {
-  banner
-  need_root
-
-  if [[ ! -d "$PANEL_DIR" ]]; then
-    err "Folder Panel tidak ditemukan: $PANEL_DIR"
-    exit 1
-  fi
-
-  ok "Repair Panel..."
-  cd "$PANEL_DIR"
-
-  chown -R www-data:www-data "$PANEL_DIR"/*
-  chmod -R 755 storage/* bootstrap/cache/
-
-  sudo -u www-data php artisan optimize:clear || true
-  sudo -u www-data php artisan config:clear || true
-  sudo -u www-data php artisan cache:clear || true
-  sudo -u www-data php artisan view:clear || true
-
-  systemctl restart php${PHP_VER}-fpm || true
-  systemctl restart redis-server || true
-  systemctl restart pteroq || true
-  nginx -t && systemctl restart nginx
-
-  ok "Repair Panel selesai."
-}
-
-repair_wings() {
-  banner
-  need_root
-
-  ok "Repair Wings..."
-  mkdir -p /etc/pterodactyl /var/lib/pterodactyl /var/log/pterodactyl
-  systemctl daemon-reload
-  systemctl restart docker || true
-
-  if [[ -f /etc/pterodactyl/config.yml ]]; then
-    systemctl restart wings || true
-  else
-    warn "/etc/pterodactyl/config.yml belum ada. Paste config dulu dari menu."
-  fi
-
-  systemctl status wings --no-pager || true
-}
-
-show_status() {
-  banner
-  echo -e "${CYAN}Status service:${NC}"
-  for svc in nginx php${PHP_VER}-fpm mariadb redis-server pteroq docker wings; do
-    if systemctl list-unit-files | grep -q "^${svc}.service"; then
-      printf "%-18s : " "$svc"
-      systemctl is-active "$svc" || true
-    fi
-  done
-
-  echo ""
-  echo -e "${CYAN}Port listen:${NC}"
-  ss -tulpn | grep -E ':(80|443|8080|2022|3306|6379)\b' || true
-
-  echo ""
-  echo -e "${CYAN}Log penting:${NC}"
-  echo "Installer : $LOG_FILE"
-  echo "Panel     : /var/log/nginx/pterodactyl.app-error.log"
-  echo "Wings     : journalctl -u wings -n 100 --no-pager"
-}
-
-safe_uninstall() {
-  banner
-  need_root
-
-  warn "Menu ini bisa menghapus service/file Panel/Wings."
-  echo "Tidak akan menghapus database kecuali kamu ketik DELETE_DB."
-  echo ""
-
-  if ! confirm "Lanjut uninstall service dan file?"; then
-    exit 0
-  fi
-
-  systemctl stop pteroq wings nginx php${PHP_VER}-fpm || true
-  systemctl disable pteroq wings || true
-
-  rm -f /etc/systemd/system/pteroq.service
-  rm -f /etc/systemd/system/wings.service
-  rm -f /etc/cron.d/pterodactyl-schedule
-  rm -f /etc/nginx/sites-enabled/pterodactyl.conf
-  rm -f /etc/nginx/sites-available/pterodactyl.conf
-  systemctl daemon-reload
-
-  if [[ -d "$PANEL_DIR" ]]; then
-    local backup="/root/pterodactyl-panel-before-uninstall-$(date +%Y%m%d-%H%M%S).tar.gz"
-    tar -czf "$backup" -C "$PANEL_DIR" . || true
-    ok "Backup panel dibuat: $backup"
-    rm -rf "$PANEL_DIR"
-  fi
-
-  if confirm "Hapus Wings binary dan config?"; then
-    rm -f /usr/local/bin/wings
-    rm -rf /etc/pterodactyl
-  fi
-
-  echo ""
-  read -r -p "Ketik DELETE_DB untuk hapus database panel: " deldb
-  if [[ "$deldb" == "DELETE_DB" ]]; then
-    mariadb -u root <<SQL
-DROP DATABASE IF EXISTS \`${DB_NAME}\`;
-DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1';
-FLUSH PRIVILEGES;
-SQL
-    ok "Database dihapus."
-  else
-    warn "Database tidak dihapus."
-  fi
-
-  systemctl restart nginx || true
-  ok "Uninstall selesai."
-}
-
-panel_summary() {
-  echo ""
-  echo -e "${GREEN}╔════════════════════════════════════╗${NC}"
-  echo -e "${GREEN}   PANEL BERHASIL DIINSTALL${NC}"
-  echo -e "${GREEN}╚════════════════════════════════════╝${NC}"
-  echo "URL Panel       : $APP_URL"
-  echo "Admin email     : $ADMIN_EMAIL"
-  echo "Username        : $ADMIN_USER"
-  echo "Password        : $ADMIN_PASS"
-  echo "Database name   : $DB_NAME"
-  echo "Database user   : $DB_USER"
-  echo "Database pass   : $DB_PASS"
-  echo ""
-  echo -e "${YELLOW}SIMPAN DATA DI ATAS. Terutama password admin, DB password, dan APP_KEY.${NC}"
-  echo "APP_KEY bisa dicek:"
-  echo "grep APP_KEY ${PANEL_DIR}/.env"
-  echo ""
-}
-
-wings_summary() {
-  echo ""
-  echo -e "${GREEN}╔════════════════════════════════════╗${NC}"
-  echo -e "${GREEN}   WINGS INSTALL SELESAI${NC}"
-  echo -e "${GREEN}╚════════════════════════════════════╝${NC}"
-  echo "Config Wings : /etc/pterodactyl/config.yml"
-  echo "Service      : systemctl status wings"
-  echo "Log          : journalctl -u wings -n 100 --no-pager"
-  echo ""
-  echo "Port umum Wings:"
-  echo "- 8080/tcp untuk Wings API"
-  echo "- 2022/tcp untuk SFTP"
-  echo "- port allocation game server sesuai node"
-  echo ""
-}
-
-install_panel_and_wings() {
-  install_panel
-  echo ""
-  if confirm "Panel selesai. Lanjut install Wings di VPS yang sama?"; then
-    install_wings
-  fi
-}
-
-main_menu() {
-  while true; do
-    banner
-    echo "1. Install Panel"
-    echo "2. Install Wings"
-    echo "3. Install Panel + Wings"
-    echo "4. Paste / Ganti config.yml Wings"
-    echo "5. Status Service"
-    echo "6. Repair Panel"
-    echo "7. Repair Wings"
-    echo "8. Safe Uninstall"
-    echo "0. Exit"
-    echo ""
-    read -r -p "Pilih menu: " pilih
-
-    case "$pilih" in
-      1) install_panel ;;
-      2) install_wings ;;
-      3) install_panel_and_wings ;;
-      4) paste_wings_config ;;
-      5) show_status ;;
-      6) repair_panel ;;
-      7) repair_wings ;;
-      8) safe_uninstall ;;
-      0) exit 0 ;;
-      *) warn "Pilihan tidak valid." ;;
-    esac
-
-    echo ""
-    read -r -p "Tekan ENTER untuk kembali ke menu..."
-  done
-}
-
-need_root
-main_menu
+main "$@"
